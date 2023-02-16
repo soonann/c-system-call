@@ -80,6 +80,7 @@ int dequeue(struct process_queue *process_queue) {
 
 static process_record *proc_records;
 static process_queue *proc_queue;
+static int *proc_record_count;
 
 /******************************************************************************
  * Functions
@@ -87,20 +88,10 @@ static process_queue *proc_queue;
 
 // running the given process
 void perform_run(char *args[]) {
-  int index = -1;
+  int index = *proc_record_count;
 
-  // check if there is any unused process space left
-  for (int i = 0; i < MAX_PROCESSES; ++i) {
-    if (proc_records[i].status == READY) {
-      index = i;
-      break;
-    }
-  }
-
-  if (index < 0) {
-    printf("no unused process slots available; searching for an entry of a "
-           "killed process.\n");
-    // if there isnt any process space that is unused, look for terminated ones
+  // if there isnt any process space that is unused, look for terminated ones
+  if (index >= 64) {
     for (int i = 0; i < MAX_PROCESSES; ++i) {
       if (proc_records[i].status == TERMINATED) {
         index = i;
@@ -110,7 +101,7 @@ void perform_run(char *args[]) {
   }
 
   // completely no process slots available
-  if (index < 0) {
+  if (index >= 64) {
     printf("no process slots available.\n");
     return;
   }
@@ -130,6 +121,7 @@ void perform_run(char *args[]) {
     char exec[len + 3];
     strcpy(exec, "./");
     strcat(exec, args[0]);
+    *proc_record_count = *proc_record_count + 1;
 
     // immediately SIGSTOP before it can execute
     // bg handler will schedule this to be run
@@ -200,9 +192,22 @@ void perform_list(void) {
       break;
     }
   }
+
   // if there isnt anything in the list, print no processes to list
   if (!anything) {
     printf("No processes to list.\n");
+  }
+}
+
+void perform_list_queue(void) {
+  bool anything = false;
+  for (int i = 0; i < proc_queue->length; i++) {
+    anything = true;
+    printf("%d, ", proc_queue->_process_queue[i]);
+  }
+
+  if (!anything) {
+    printf("No processes to list in queue.\n");
   }
 }
 
@@ -246,12 +251,19 @@ void perform_stop() {}
 
 int main(void) {
 
+  proc_record_count = mmap(NULL, sizeof(int *), PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   proc_records =
       mmap(NULL, sizeof(struct process_record) * MAX_PROCESSES,
            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   proc_queue = mmap(NULL, sizeof(struct process_queue), PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+  // init proc_queue
   init_process_queue(proc_queue);
+
+  // init proc_record_count
+  *proc_record_count = 0;
 
   // start background handler
   pid_t bg_handler_pid = fork();
@@ -273,32 +285,37 @@ int main(void) {
 
       // there is a process currently active, handle it
       else {
+
+        // current process we're inspecting
+        process_record *const p = &(proc_records[current_process_index]);
+
         // resume the process by using SIGCONT and set it to RUNNING
-        kill(current_process_index, SIGCONT);
-        proc_records[current_process_index].status = RUNNING;
-
-        pid_t timer = fork();
-
-        // child timer
-        if (timer == 0) {
-          sleep(5);
-          // exit program after timer finishes
-          exit(1);
-        }
+        kill(p->pid, SIGCONT);
+        p->status = RUNNING;
 
         // the two different pids we're going to be waiting for
-        pid_t time_process_pid = timer;
-        pid_t curret_process_pid = proc_records[current_process_index].pid;
+        pid_t curret_process_pid = p->pid;
+        pid_t time_process_pid = fork();
+        char *timer_args = {""};
+
+        // child timer process body
+        if (time_process_pid == 0) {
+          execvp("./timer", &timer_args);
+        }
 
         bool has_timer_or_current_responded = false;
-        int status;
+        int timer_status;
+        int curr_proc_status;
 
         // wait for either the timer to return or the current process to return
         while (!has_timer_or_current_responded) {
 
+          // process responds first, means it has completed and ran less than 5
+          // seconds and has ended by itself
           // timer responds first, means 5 seconds has run out
-          if (waitpid(time_process_pid, &status, WNOHANG) == time_process_pid) {
-            // sigstop the process
+          if (waitpid(time_process_pid, &timer_status, WNOHANG) ==
+              time_process_pid) {
+            // SIGSTOP the process
             kill(curret_process_pid, SIGSTOP);
 
             // enqueue it back to the end of the process queue to be run again
@@ -306,23 +323,23 @@ int main(void) {
             enqueue(proc_queue, current_process_index);
 
             // update process listing detail
-            proc_records[current_process_index].status = READY;
+            p->status = READY;
 
+            current_process_index = -1;
             has_timer_or_current_responded = true;
-
           }
 
-          // process responds first, means it has completed and ran less than 5
-          // seconds and has ended by itself
-          else if (waitpid(current_process_index, &status, WNOHANG) ==
-                   current_process_index) {
+          else if (waitpid(curret_process_pid, &curr_proc_status, WNOHANG) ==
+                   curret_process_pid) {
+
+            // if the current process returns by itself, means its done
+            kill(curret_process_pid, SIGKILL);
+
+            // update process listing detail
+            p->status = TERMINATED;
 
             // reset current process to be -1 to pop a new process
             current_process_index = -1;
-
-            // update process listing detail
-            proc_records[current_process_index].status = TERMINATED;
-
             has_timer_or_current_responded = true;
           }
         }
@@ -349,6 +366,10 @@ int main(void) {
     // list processes
     else if (strcmp(cmd, "list") == 0) {
       perform_list();
+    }
+    // list queue
+    else if (strcmp(cmd, "list-queue") == 0) {
+      perform_list_queue();
     }
     // resume process
     else if (strcmp(cmd, "resume") == 0) {
