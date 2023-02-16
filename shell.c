@@ -17,8 +17,8 @@ enum {
 };
 
 typedef enum process_status {
-  READY = 0,
-  RUNNING = 1,
+  RUNNING = 0,
+  READY = 1,
   STOPPED = 2,
   TERMINATED = 3,
 } process_status;
@@ -151,7 +151,7 @@ void perform_run(char *args[]) {
 }
 
 // kill the specified process
-void perform_kill(char *args[]) {
+void perform_action(char *args[], int SIGNAL) {
   const pid_t pid = atoi(args[0]);
 
   if (pid <= 0) {
@@ -160,12 +160,28 @@ void perform_kill(char *args[]) {
   }
 
   // loop through the processes and look for the one with specified pid
-  for (int i = 0; i < MAX_PROCESSES; ++i) {
+  for (int i = 0; i < MAX_PROCESSES; i++) {
     process_record *const p = &(proc_records[i]);
-    if ((p->pid == pid) && (p->status == RUNNING)) {
-      kill(p->pid, SIGTERM);
-      printf("[%d] %d killed\n", i, p->pid);
-      p->status = TERMINATED;
+    // find the process matching the id
+    if (p->pid == pid) {
+      switch (SIGNAL) {
+      case SIGCONT:
+        printf("resuming %d\n", p->pid);
+        p->status = READY;
+        // will not actually send SIGCONT as it the background handler will
+        // handle it
+        break;
+      case SIGSTOP:
+        printf("stopping %d\n", p->pid);
+        p->status = STOPPED;
+        kill(p->pid, SIGNAL);
+        break;
+      case SIGTERM:
+        printf("terminating %d\n", p->pid);
+        p->status = TERMINATED;
+        kill(p->pid, SIGNAL);
+        break;
+      }
       return;
     }
   }
@@ -175,46 +191,15 @@ void perform_kill(char *args[]) {
 void perform_list(void) {
   // loop through all child processes, display status
   bool anything = false;
-  for (int i = 0; i < MAX_PROCESSES; ++i) {
+  for (int i = 0; i < *proc_record_count; ++i) {
     process_record *const p = &(proc_records[i]);
-    if (p->pid == 0) {
-      break;
-    }
-    switch (p->status) {
-    case STOPPED:
-      printf("[%d] %d stopped\n", i, p->pid);
-      anything = true;
-      break;
-    case READY:
-      printf("[%d] %d ready\n", i, p->pid);
-      anything = true;
-      break;
-    case RUNNING:
-      printf("[%d] %d running\n", i, p->pid);
-      anything = true;
-      break;
-    case TERMINATED:
-      printf("[%d] %d killed\n", i, p->pid);
-      anything = true;
-      break;
-    }
+    printf("%d,%d \n", p->pid, p->status);
+    anything = true;
   }
 
   // if there isnt anything in the list, print no processes to list
   if (!anything) {
     printf("No processes to list.\n");
-  }
-}
-
-void perform_list_queue(void) {
-  bool anything = false;
-  for (int i = 0; i < proc_queue->length; i++) {
-    anything = true;
-    printf("%d, ", proc_queue->_process_queue[i]);
-  }
-
-  if (!anything) {
-    printf("No processes to list in queue.\n");
   }
 }
 
@@ -245,10 +230,6 @@ char *get_input(char *buffer, char *args[], int args_count_max) {
   args[arg_cnt] = NULL;
   return args[0];
 }
-
-void perform_resume() {}
-
-void perform_stop() {}
 
 /******************************************************************************
  * Entry point
@@ -286,6 +267,13 @@ int main(void) {
       if (current_process_index == -1) {
         // keep trying to dequeue to see if there is a new process to run
         current_process_index = dequeue(proc_queue);
+        process_record *const p = &(proc_records[current_process_index]);
+        // if the process i've just popped is not ready, remove it from the
+        // process queue entirely
+        if (p->status != READY) {
+          enqueue(proc_queue, current_process_index);
+          current_process_index = -1;
+        }
       }
 
       // there is a process currently active, handle it
@@ -316,10 +304,6 @@ int main(void) {
 
         // wait for either the timer to return or the current process to return
         while (!has_timer_or_current_responded) {
-          /*printf("%d and %d, %d, %d,\n",*/
-          /*waitpid(curr_proc_pid, &curr_proc_status, WNOHANG),*/
-          /*curr_proc_pid, curr_proc_status, kill(curr_proc_pid, 0));*/
-          /*[>printf("%d is kill\n", );<]*/
 
           // process responds first, means it has completed and ran less
           // than 5 seconds and has ended by itself timer responds first,
@@ -352,10 +336,31 @@ int main(void) {
             // reset current process to be -1 to pop a new process
             current_process_index = -1;
             has_timer_or_current_responded = true;
+          } else if (p->status != RUNNING) {
+
+            // kill the process in case it hasnt been cleaned up yet
+            kill(time_process_pid, SIGTERM);
+            // depending on what is the new status, send the signal
+            switch (p->status) {
+            case STOPPED:
+              kill(curr_proc_pid, SIGSTOP);
+              enqueue(proc_queue, current_process_index);
+              break;
+            case TERMINATED:
+              kill(curr_proc_pid, SIGTERM);
+              break;
+            default:
+              break;
+            }
+
+            // reset current process to be -1 to pop a new process
+            current_process_index = -1;
+            has_timer_or_current_responded = true;
           }
         }
       }
     }
+    printf("bg handler exited\n");
   }
 
   // create a buffer to store the string inputs
@@ -378,23 +383,17 @@ int main(void) {
     else if (strcmp(cmd, "list") == 0) {
       perform_list();
     }
-    // list queue
-    else if (strcmp(cmd, "list-queue") == 0) {
-      perform_list_queue();
-    }
     // resume process
     else if (strcmp(cmd, "resume") == 0) {
-      perform_resume();
-      break;
+      perform_action(&args[1], SIGCONT);
     }
     // stop process
     else if (strcmp(cmd, "stop") == 0) {
-      perform_stop();
-      break;
+      perform_action(&args[1], SIGSTOP);
     }
     // kill process
     else if (strcmp(cmd, "kill") == 0) {
-      perform_kill(&args[1]);
+      perform_action(&args[1], SIGTERM);
     }
     // exit shell
     else if (strcmp(cmd, "exit") == 0) {
