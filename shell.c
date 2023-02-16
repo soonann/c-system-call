@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -77,8 +78,8 @@ int dequeue(struct process_queue *process_queue) {
  * Global Variables
  ******************************************************************************/
 
-process_record proc_records[MAX_PROCESSES];
-process_queue proc_queue;
+static process_record *proc_records;
+static process_queue *proc_queue;
 
 /******************************************************************************
  * Functions
@@ -140,12 +141,12 @@ void perform_run(char *args[]) {
   }
 
   // add the record to the list of processes
-  process_record *const p = &proc_records[index];
+  process_record *const p = &(proc_records[index]);
   p->pid = pid;
   p->status = READY;
 
   // add the process to the process queue's end
-  enqueue(&proc_queue, index);
+  enqueue(proc_queue, index);
 
   printf("[%d] %d created\n", index, p->pid);
 }
@@ -161,7 +162,7 @@ void perform_kill(char *args[]) {
 
   // loop through the processes and look for the one with specified pid
   for (int i = 0; i < MAX_PROCESSES; ++i) {
-    process_record *const p = &proc_records[i];
+    process_record *const p = &(proc_records[i]);
     if ((p->pid == pid) && (p->status == RUNNING)) {
       kill(p->pid, SIGTERM);
       printf("[%d] %d killed\n", i, p->pid);
@@ -176,7 +177,7 @@ void perform_list(void) {
   // loop through all child processes, display status
   bool anything = false;
   for (int i = 0; i < MAX_PROCESSES; ++i) {
-    process_record *const p = &proc_records[i];
+    process_record *const p = &(proc_records[i]);
     if (p->pid == 0) {
       break;
     }
@@ -237,18 +238,7 @@ void perform_resume() {}
 
 void perform_stop() {}
 
-pid_t non_blocking_timer() {
-
-  pid_t timer = fork();
-
-  // child timer
-  if (timer == 0) {
-    sleep(5);
-    // exit program after timer finishes
-    exit(1);
-  }
-  return timer;
-}
+/*pid_t non_blocking_timer() { return timer; }*/
 
 /******************************************************************************
  * Entry point
@@ -256,8 +246,12 @@ pid_t non_blocking_timer() {
 
 int main(void) {
 
-  // initialise the process queue data structure
-  init_process_queue(&proc_queue);
+  proc_records =
+      mmap(NULL, sizeof(struct process_record) * MAX_PROCESSES,
+           PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  proc_queue = mmap(NULL, sizeof(struct process_queue), PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  init_process_queue(proc_queue);
 
   // start background handler
   pid_t bg_handler_pid = fork();
@@ -274,22 +268,29 @@ int main(void) {
       // no process to handle currenly
       if (current_process_index == -1) {
         // try to dequeue to see if there is a new process to run
-        current_process_index = dequeue(&proc_queue);
-        /*printf("bgHandler: found %d, \n", current_process_index);*/
+        current_process_index = dequeue(proc_queue);
       }
 
       // there is a process currently active, handle it
       else {
-        printf("bgHandler: running process %d\n", current_process_index);
         // resume the process by using SIGCONT and set it to RUNNING
         kill(current_process_index, SIGCONT);
         proc_records[current_process_index].status = RUNNING;
 
+        pid_t timer = fork();
+
+        // child timer
+        if (timer == 0) {
+          sleep(5);
+          // exit program after timer finishes
+          exit(1);
+        }
+
         // the two different pids we're going to be waiting for
-        pid_t time_process_pid = non_blocking_timer();
+        pid_t time_process_pid = timer;
         pid_t curret_process_pid = proc_records[current_process_index].pid;
 
-        int has_timer_or_current_responded = 0;
+        bool has_timer_or_current_responded = false;
         int status;
 
         // wait for either the timer to return or the current process to return
@@ -302,18 +303,27 @@ int main(void) {
 
             // enqueue it back to the end of the process queue to be run again
             // later
-            enqueue(&proc_queue, current_process_index);
-            has_timer_or_current_responded = 1;
+            enqueue(proc_queue, current_process_index);
+
+            // update process listing detail
+            proc_records[current_process_index].status = READY;
+
+            has_timer_or_current_responded = true;
 
           }
+
           // process responds first, means it has completed and ran less than 5
           // seconds and has ended by itself
           else if (waitpid(current_process_index, &status, WNOHANG) ==
                    current_process_index) {
 
-            has_timer_or_current_responded = 1;
             // reset current process to be -1 to pop a new process
             current_process_index = -1;
+
+            // update process listing detail
+            proc_records[current_process_index].status = TERMINATED;
+
+            has_timer_or_current_responded = true;
           }
         }
       }
