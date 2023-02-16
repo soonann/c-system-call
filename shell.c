@@ -13,7 +13,7 @@
 
 enum {
   MAX_PROCESSES = 64,
-  MAX_RUNTIME = 5000,
+  MAX_RUNTIME = 5,
 };
 
 typedef enum process_status {
@@ -107,40 +107,47 @@ void perform_run(char *args[]) {
   }
 
   // managed to find a process space to fork
-  pid_t pid = fork();
+  pid_t pid_dummy = fork();
+  int status;
 
-  // error handling for fork
-  if (pid < 0) {
-    fprintf(stderr, "fork failed\n");
-    return;
+  // dummy fork
+  if (pid_dummy == 0) {
+
+    // actual exec fork
+    pid_t pid_exec = fork();
+    if (pid_exec == 0) {
+
+      // immediately SIGSTOP before it can execute
+      // bg handler will schedule this to be run
+      raise(SIGSTOP);
+      execvp(args[0], args);
+    }
+
+    if (pid_exec < 0) {
+      exit(EXIT_FAILURE);
+    }
+
+    if (pid_exec > 0) {
+      // add the record to the list of processes
+      process_record *const p = &(proc_records[index]);
+      p->pid = pid_exec;
+      p->status = READY;
+      // dummy exits
+      // add the process to the process queue's end
+      enqueue(proc_queue, index);
+
+      *proc_record_count = *proc_record_count + 1;
+      exit(EXIT_SUCCESS);
+    }
   }
 
-  // child process
-  if (pid == 0) {
-    const int len = strlen(args[0]);
-    char exec[len + 3];
-    strcpy(exec, "./");
-    strcat(exec, args[0]);
-    *proc_record_count = *proc_record_count + 1;
-
-    // immediately SIGSTOP before it can execute
-    // bg handler will schedule this to be run
-    raise(SIGSTOP);
-    execvp(exec, args);
-
-    // Unreachable code unless execution failed.
+  if (pid_dummy < 0) {
     exit(EXIT_FAILURE);
   }
 
-  // add the record to the list of processes
-  process_record *const p = &(proc_records[index]);
-  p->pid = pid;
-  p->status = READY;
-
-  // add the process to the process queue's end
-  enqueue(proc_queue, index);
-
-  printf("[%d] %d created\n", index, p->pid);
+  // wait for dummy fork to return
+  while (waitpid(pid_dummy, &status, WNOHANG) == pid_dummy) {
+  }
 }
 
 // kill the specified process
@@ -243,8 +250,6 @@ void perform_resume() {}
 
 void perform_stop() {}
 
-/*pid_t non_blocking_timer() { return timer; }*/
-
 /******************************************************************************
  * Entry point
  ******************************************************************************/
@@ -279,11 +284,12 @@ int main(void) {
 
       // no process to handle currenly
       if (current_process_index == -1) {
-        // try to dequeue to see if there is a new process to run
+        // keep trying to dequeue to see if there is a new process to run
         current_process_index = dequeue(proc_queue);
       }
 
       // there is a process currently active, handle it
+      // current_process_index != -1
       else {
 
         // current process we're inspecting
@@ -294,29 +300,34 @@ int main(void) {
         p->status = RUNNING;
 
         // the two different pids we're going to be waiting for
-        pid_t curret_process_pid = p->pid;
+        pid_t curr_proc_pid = p->pid;
         pid_t time_process_pid = fork();
-        char *timer_args = {""};
 
-        // child timer process body
+        // child timer process
         if (time_process_pid == 0) {
-          execvp("./timer", &timer_args);
+          sleep(MAX_RUNTIME);
+          exit(EXIT_SUCCESS);
         }
 
+        // bg handler process
         bool has_timer_or_current_responded = false;
         int timer_status;
         int curr_proc_status;
 
         // wait for either the timer to return or the current process to return
         while (!has_timer_or_current_responded) {
+          /*printf("%d and %d, %d, %d,\n",*/
+          /*waitpid(curr_proc_pid, &curr_proc_status, WNOHANG),*/
+          /*curr_proc_pid, curr_proc_status, kill(curr_proc_pid, 0));*/
+          /*[>printf("%d is kill\n", );<]*/
 
-          // process responds first, means it has completed and ran less than 5
-          // seconds and has ended by itself
-          // timer responds first, means 5 seconds has run out
+          // process responds first, means it has completed and ran less
+          // than 5 seconds and has ended by itself timer responds first,
+          // means 5 seconds has run out
           if (waitpid(time_process_pid, &timer_status, WNOHANG) ==
               time_process_pid) {
             // SIGSTOP the process
-            kill(curret_process_pid, SIGSTOP);
+            kill(curr_proc_pid, SIGSTOP);
 
             // enqueue it back to the end of the process queue to be run again
             // later
@@ -329,11 +340,11 @@ int main(void) {
             has_timer_or_current_responded = true;
           }
 
-          else if (waitpid(curret_process_pid, &curr_proc_status, WNOHANG) ==
-                   curret_process_pid) {
+          else if (kill(curr_proc_pid, 0) == -1) {
 
-            // if the current process returns by itself, means its done
-            kill(curret_process_pid, SIGKILL);
+            // kill the process in case it hasnt been cleaned up yet
+            kill(curr_proc_pid, SIGTERM);
+            kill(time_process_pid, SIGTERM);
 
             // update process listing detail
             p->status = TERMINATED;
