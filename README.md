@@ -46,7 +46,7 @@ chmod +x shell
 ./shell
 ```
 
-## System Design
+# System Design
 There are 3 main components to the shell.
 
 ![](./c-system-call.drawio.png)
