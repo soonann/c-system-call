@@ -121,28 +121,36 @@ void perform_run(char *args[]) {
       // bg handler will schedule this to be run
       raise(SIGSTOP);
       execvp(args[0], args);
-    }
 
-    if (pid_exec < 0) {
+      // error handling
+      printf("run command failed\n");
       exit(EXIT_FAILURE);
     }
 
+    // exec fork - error handling
+    if (pid_exec < 0) {
+      fprintf(stderr, "fork failed\n");
+      return;
+    }
+
+    // exec fork parent aka dummy fork's child process
     if (pid_exec > 0) {
       // add the record to the list of processes
       process_record *const p = &(proc_records[index]);
       p->pid = pid_exec;
       p->status = READY;
-      // dummy exits
+
       // add the process to the process queue's end
       enqueue(proc_queue, index);
-
       *proc_record_count = *proc_record_count + 1;
       exit(EXIT_SUCCESS);
     }
   }
 
+  // dummy fork - error handling
   if (pid_dummy < 0) {
-    exit(EXIT_FAILURE);
+    fprintf(stderr, "fork failed\n");
+    return;
   }
 
   // wait for dummy fork to return
@@ -166,10 +174,11 @@ void perform_action(char *args[], int SIGNAL) {
     if (p->pid == pid) {
       switch (SIGNAL) {
       case SIGCONT:
-        printf("resuming %d\n", p->pid);
-        p->status = READY;
         // will not actually send SIGCONT as it the background handler will
         // handle it
+        printf("resuming %d\n", p->pid);
+        p->status = READY;
+        enqueue(proc_queue, i);
         break;
       case SIGSTOP:
         printf("stopping %d\n", p->pid);
@@ -203,7 +212,7 @@ void perform_list(void) {
   }
 }
 
-void perform_exit(void) { printf("bye!\n"); }
+void perform_exit(void) { printf("exiting shell ...\n"); }
 
 // get input from terminal
 char *get_input(char *buffer, char *args[], int args_count_max) {
@@ -271,7 +280,6 @@ int main(void) {
         // if the process i've just popped is not ready, remove it from the
         // process queue entirely
         if (p->status != READY) {
-          enqueue(proc_queue, current_process_index);
           current_process_index = -1;
         }
       }
@@ -324,6 +332,8 @@ int main(void) {
             has_timer_or_current_responded = true;
           }
 
+          // using kill to check if the process has ended, cant use waitpid
+          // because the process started is not the bg handler's child
           else if (kill(curr_proc_pid, 0) == -1) {
 
             // kill the process in case it hasnt been cleaned up yet
@@ -336,15 +346,17 @@ int main(void) {
             // reset current process to be -1 to pop a new process
             current_process_index = -1;
             has_timer_or_current_responded = true;
-          } else if (p->status != RUNNING) {
+          }
+          // if process was manually terminated
+          else if (p->status != RUNNING) {
 
             // kill the process in case it hasnt been cleaned up yet
             kill(time_process_pid, SIGTERM);
+
             // depending on what is the new status, send the signal
             switch (p->status) {
             case STOPPED:
               kill(curr_proc_pid, SIGSTOP);
-              enqueue(proc_queue, current_process_index);
               break;
             case TERMINATED:
               kill(curr_proc_pid, SIGTERM);
@@ -394,6 +406,10 @@ int main(void) {
     // kill process
     else if (strcmp(cmd, "kill") == 0) {
       perform_action(&args[1], SIGTERM);
+    } else if (strcmp(cmd, "list-q") == 0) {
+      for (int i = 0; i < proc_queue->length; i++) {
+        printf("%d,", proc_queue->_process_queue[i]);
+      }
     }
     // exit shell
     else if (strcmp(cmd, "exit") == 0) {
