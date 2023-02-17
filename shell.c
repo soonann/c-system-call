@@ -387,8 +387,12 @@ int main(void) {
   // keep prompting until the user exits
   while (true) {
     char *const cmd = get_input(buffer, args, args_count);
+    if (cmd == NULL) {
+      // do nothing and let the enter show the newline
+      // this is necessary to avoid segmentation fault :)
+    }
     // run process
-    if (strcmp(cmd, "run") == 0) {
+    else if (strcmp(cmd, "run") == 0) {
       perform_run(&args[1]);
     }
     // list processes

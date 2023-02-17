@@ -1,1 +1,1 @@
-Process ran 53 out of 100 secs
+Process ran 10 out of 10 secs
